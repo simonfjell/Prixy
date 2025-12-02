@@ -7,7 +7,14 @@ const inter = Inter({
   subsets: ["latin"],
 });
 
+const inter = Inter({
+  subsets: ["latin"],
+});
 
+export const metadata: Metadata = {
+  title: "Prixy - Smarta prisjämförelser",
+  description: "...",
+  // ... resten
   title: "Prixy - Smarta prisjämförelser",
   description: "Jämför priser från Tradera, Power, XXL, Elgiganten och fler med AI-driven prisanalys",
   icons: {
