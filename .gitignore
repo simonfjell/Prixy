@@ -1,0 +1,3 @@
+# Ignorera känsliga filer
+node_modules
+/.env.local
