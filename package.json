@@ -4,14 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build", 
+    "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",
-    "next": "14.2.0",
+    "autoprefixer": "^10.4.22",
+    "next": "^16.0.6",
     "openai": "^6.9.1",
+    "postcss": "^8.5.6",
     "react": "18.2.0",
     "react-dom": "18.2.0"
   },
@@ -22,7 +24,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.0.4",
-    "tailwindcss": "^4",
+    "tailwindcss": "^4.1.17",
     "typescript": "^5"
   }
 }

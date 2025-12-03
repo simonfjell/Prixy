@@ -1,5 +1,13 @@
 # Ignorera känsliga filer
+.env
+.env.local
+.env.*.local
+
+# Node & Next.js
 node_modules
-/.env.local
 .next/
 out/
+
+# Bygg / cache
+dist/
+.cache/

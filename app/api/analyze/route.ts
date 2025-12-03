@@ -1,29 +1,13 @@
-// Universal previous price extractor (selectors + regex)
-function extractPreviousPrice(html: string): number | null {
-  // Common selectors (for future DOM parsing)
-  // Fallback: regex in HTML
-  const regex = /(?:ord\.?pris|tidigare|was|previous|före|förr|rek\.?pris|rekommenderat pris)[^\d]{0,30}(\d[\d\s,.]+)/i;
-  const match = html.match(regex);
-  if (match && match[1]) {
-    // Clean up price string
-    const cleaned = match[1].replace(/[^\d]/g, '');
-    const num = parseInt(cleaned, 10);
-    if (!isNaN(num) && num > 0) return num;
-  }
-  return null;
-}
-// Enkel in-memory cache (för demo/utveckling, nollställs vid omstart)
-const productCache = new Map<string, any>();
+// ------------------------------------------------------------
+// NEXT.JS RUNTIME
+// ------------------------------------------------------------
+export const runtime = "nodejs";
 
-function makeCacheKey(data: { title?: string|null, priceValue?: number|null, brand?: string|null }) {
-  // Bygg en enkel hash-nyckel av titel, pris och ev. brand
-  return [
-    (data.title || '').toLowerCase().replace(/\s+/g, ''),
-    data.priceValue || '',
-    (data.brand || '').toLowerCase().replace(/\s+/g, '')
-  ].join('|');
-}
+// ------------------------------------------------------------
+// IMPORTS
+// ------------------------------------------------------------
 import { NextResponse } from "next/server";
+
 import { traderaScraper } from "../../../lib/scrapers/tradera";
 import { xxlScraper } from "../../../lib/scrapers/xxl";
 import { elgigantenScraper } from "../../../lib/scrapers/elgiganten";
@@ -31,18 +15,35 @@ import { blocketScraper } from "../../../lib/scrapers/blocket";
 import { hedinScraper } from "../../../lib/scrapers/hedin";
 import { powerScraper } from "../../../lib/scrapers/power";
 import { sellpyScraper } from "../../../lib/scrapers/sellpy";
-import { ProductAnalyzer } from "../../../lib/ai/productAnalyzer";
 import { vintedScraper } from "../../../lib/scrapers/vinted";
 import { webhallenScraperV2 } from "../../../lib/scrapers/webhallen_v2";
-// import { inetTestScraper } from "../../../lib/scrapers/inet_test";
+import { netonnetScraper } from "../../../lib/scrapers/netonnet";
+import { ProductAnalyzer } from "../../../lib/ai/productAnalyzer";
 
-// Dekoda HTML entities som &#229; -> å
-function decodeEntities(str: string | null | undefined) {
-  if (!str) return str ?? "";
-  return str.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
+// ------------------------------------------------------------
+// HELPERS
+// ------------------------------------------------------------
+
+// Enkel “tidigare pris”-regex som backup
+function extractPreviousPrice(html: string): number | null {
+  const regex =
+    /(?:ord\.?pris|tidigare|was|previous|före|förr|rek\.?pris|rekommenderat pris)[^\d]{0,30}(\d[\d\s,.]+)/i;
+
+  const match = html.match(regex);
+  if (!match || !match[1]) return null;
+
+  const cleaned = match[1].replace(/[^\d]/g, "");
+  const num = parseInt(cleaned, 10);
+  return isNaN(num) || num <= 0 ? null : num;
 }
 
-// Ta bort taggar, script osv -> ren text
+function decodeEntities(str: string | null | undefined) {
+  if (!str) return str ?? "";
+  return str.replace(/&#(\d+);/g, (_, code) =>
+    String.fromCharCode(parseInt(code, 10)),
+  );
+}
+
 function stripHtml(raw: string): string {
   return raw
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -52,414 +53,185 @@ function stripHtml(raw: string): string {
     .trim();
 }
 
-// Helper function to add AI analysis to scraper results
+// ------------------------------------------------------------
+// AI ANALYS (din befintliga logik)
+// ------------------------------------------------------------
 async function addAIAnalysis(scrapedData: any, url: string) {
-  // Only analyze if we have an API key
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    console.warn("⚠️ Ingen ANTHROPIC_API_KEY – hoppar över AI-analys");
     return { ...scrapedData, aiAnalysis: null };
   }
 
   try {
-    // --- Fake-rea-detektion och previousPrice-extraktion ---
-    // Hoppa fake-rea-detektion på begagnat-sajter
-    let previousPrice: number | null = null;
-    const isUsedSite = ["tradera.com", "blocket.se", "sellpy.se", "vinted.se"].some(domain => url.includes(domain));
-    if (!isUsedSite) {
-      if (scrapedData.previousPrice && typeof scrapedData.previousPrice === 'number') {
-        previousPrice = scrapedData.previousPrice;
-      } else if (scrapedData.rawHtml && typeof scrapedData.rawHtml === 'string') {
-        previousPrice = extractPreviousPrice(scrapedData.rawHtml);
-      } else if (scrapedData.description && typeof scrapedData.description === 'string') {
-        previousPrice = extractPreviousPrice(scrapedData.description);
-      }
+    const isUsedSite = ["tradera.com", "blocket.se", "sellpy.se", "vinted.se"].some(
+      (domain) => url.includes(domain),
+    );
+
+    let previousPrice: number | null =
+      typeof scrapedData.previousPrice === "number"
+        ? scrapedData.previousPrice
+        : null;
+
+    if (!isUsedSite && !previousPrice && typeof scrapedData.description === "string") {
+      previousPrice = extractPreviousPrice(scrapedData.description);
     }
 
     const analyzer = new ProductAnalyzer(apiKey);
+
     const analysis = await analyzer.analyzeProduct({
-      title: scrapedData.pageTitle || 'Okänd produkt',
-      price: scrapedData.priceRaw || '0',
-      description: scrapedData.description,
+      title: scrapedData.pageTitle || "Okänd produkt",
+      price:
+        scrapedData.priceRaw ||
+        (typeof scrapedData.priceValue === "number"
+          ? `${scrapedData.priceValue}`
+          : "0"),
+      description: scrapedData.description || "",
       condition: scrapedData.condition,
       brand: scrapedData.brand,
-      originalPrice: previousPrice ? `${previousPrice} kr` : (scrapedData.originalPrice || undefined)
+      originalPrice: previousPrice ? `${previousPrice} kr` : undefined,
     });
 
-
-    // --- Fejkad rea: NY logik enligt expertregler ---
-    let fakeSaleFlag = false;
-    let fakeSaleWarning = '';
-    // Hämta AI:ns rimliga intervall (t.ex. "18000-20000kr")
-    let fairMin = null, fairMax = null;
-    let isNewUnreleasedProduct = false;
-    
-    if (analysis.estimatedFairPrice && typeof analysis.estimatedFairPrice === 'string') {
-      // Kolla om AI:n säger att produkten är för ny/ej lanserad
-      const lowerReasoning = (analysis.reasoning || '').toLowerCase();
-      isNewUnreleasedProduct = lowerReasoning.includes('ej lanserad') || 
-                              lowerReasoning.includes('inte lanserad') || 
-                              lowerReasoning.includes('ny modell') && lowerReasoning.includes('osäker') ||
-                              lowerReasoning.includes('för ny') ||
-                              analysis.verdict === 'oklart' && lowerReasoning.includes('utan definitiv marknad');
-      
-      const fairMatch = analysis.estimatedFairPrice.match(/(\d{3,6})\s*[-–]\s*(\d{3,6})/);
-      if (fairMatch) {
-        fairMin = parseInt(fairMatch[1], 10);
-        fairMax = parseInt(fairMatch[2], 10);
-      } else {
-        const singleMatch = analysis.estimatedFairPrice.match(/(\d{3,6})/);
-        if (singleMatch) fairMin = parseInt(singleMatch[1], 10);
-      }
-      
-      // För nya produkter: försök hitta referens från föregående generation
-      if (isNewUnreleasedProduct && (!fairMin || !fairMax)) {
-        const title = scrapedData.pageTitle || '';
-        let referencePrice = null;
-        
-        // RTX 50-serien → RTX 40-serien
-        if (title.match(/RTX\s*50\d0/i)) {
-          const modelMatch = title.match(/RTX\s*50(\d)0/i);
-          if (modelMatch) {
-            const tier = modelMatch[1];
-            // RTX 5090 → RTX 4090 referens (~22000-26000)
-            // RTX 5080 → RTX 4080 referens (~12000-16000) 
-            if (tier === '9') referencePrice = 24000;
-            else if (tier === '8') referencePrice = 14000;
-            else if (tier === '7') referencePrice = 10000;
-            else if (tier === '6') referencePrice = 7000;
-          }
-        }
-        
-        if (referencePrice) {
-          fairMin = Math.round(referencePrice * 0.85);  // -15%
-          fairMax = Math.round(referencePrice * 1.25);  // +25%
-          console.log(`New product reference: ${fairMin}-${fairMax} kr based on previous gen ${referencePrice} kr`);
-        }
-      }
-    }
-
-    // Om nupriset är under marknadsvärde, sätt verdict till 'kap' oavsett AI:ns svar
-    if (
-      fairMin !== null && typeof fairMin === 'number' &&
-      scrapedData.priceValue && typeof scrapedData.priceValue === 'number' &&
-      scrapedData.priceValue < fairMin
-    ) {
-      if (analysis.verdict !== 'kap') {
-        analysis.verdict = 'kap';
-        analysis.reasoning = (analysis.reasoning ? analysis.reasoning + ' ' : '') + 'Nuvarande pris är under marknadsvärde – detta är ett kap, även om rean är fejkad eller tidigare pris är vilseledande.';
-      }
-    }
-    
-    // Om nupriset är inom marknadsspannet, sätt verdict till 'rimligt' oavsett AI:ns svar
-    if (
-      fairMin !== null && typeof fairMin === 'number' &&
-      fairMax !== null && typeof fairMax === 'number' &&
-      scrapedData.priceValue && typeof scrapedData.priceValue === 'number' &&
-      scrapedData.priceValue >= fairMin && scrapedData.priceValue <= fairMax
-    ) {
-      if (analysis.verdict === 'kap') {
-        analysis.verdict = 'rimligt';
-        analysis.reasoning = (analysis.reasoning ? analysis.reasoning + ' ' : '') + 'Priset ligger inom det rimliga marknadsspannet.';
-      }
-    }
-    // Årsmodell 2023–2025?
-    const yearMatch = (scrapedData.pageTitle || scrapedData.description || '').match(/20(2[3-5])/);
-    const isNewModel = !!yearMatch;
-
-    // NY: Flagga fake-rea om tidigare pris är >20% över marknadsvärde, oavsett årsmodell och återförsäljare
-    if (
-      fairMin !== null && typeof fairMin === 'number' &&
-      fairMax !== null && typeof fairMax === 'number' &&
-      previousPrice && typeof previousPrice === 'number' &&
-      scrapedData.priceValue && typeof scrapedData.priceValue === 'number'
-    ) {
-      const prevMuchHigher = previousPrice > fairMax * 1.20;
-      if (prevMuchHigher) {
-        fakeSaleFlag = true;
-        if (scrapedData.priceValue < fairMin) {
-          fakeSaleWarning = `⚠️ Möjlig bluff-rea: "Tidigare pris" (${previousPrice} kr) är över 20% högre än rimligt marknadsvärde (${fairMin}-${fairMax} kr). Detta kan vara ett påhittat eller vilseledande jämförelsepris. Men: nuvarande pris är faktiskt riktigt bra – du blir inte lurad på affären, bara på reans storlek!`;
-        } else if (scrapedData.priceValue <= fairMax * 1.05) {
-          fakeSaleWarning = `⚠️ Möjlig bluff-rea: "Tidigare pris" (${previousPrice} kr) är över 20% högre än rimligt marknadsvärde (${fairMin}-${fairMax} kr). Detta kan vara ett påhittat eller vilseledande jämförelsepris. Nuvarande pris är rimligt, men rean är troligen överdriven.`;
-        } else {
-          fakeSaleWarning = `⚠️ Möjlig bluff-rea: "Tidigare pris" (${previousPrice} kr) är över 20% högre än rimligt marknadsvärde (${fairMin}-${fairMax} kr). Detta kan vara ett påhittat eller vilseledande jämförelsepris.`;
-        }
-      }
-    }
-
-    // Behåll även den gamla (striktare) regeln för nya modeller
-    if (
-      fairMin !== null && typeof fairMin === 'number' &&
-      fairMax !== null && typeof fairMax === 'number' &&
-      scrapedData.priceValue && typeof scrapedData.priceValue === 'number' &&
-      previousPrice && typeof previousPrice === 'number'
-    ) {
-      const priceInRange = scrapedData.priceValue >= fairMin * 0.95 && scrapedData.priceValue <= fairMax * 1.05;
-      const prevMuchHigher = previousPrice > fairMax * 1.25;
-      if (priceInRange && prevMuchHigher && isNewModel) {
-        fakeSaleFlag = true;
-        if (scrapedData.priceValue < fairMin) {
-          fakeSaleWarning = `⚠️ Fejkad rea: Tidigare pris (${previousPrice} kr) är minst 25% högre än rimligt marknadspris (${fairMin}-${fairMax} kr) för en ny modell (${yearMatch ? yearMatch[0] : ''}). Detta är troligen ett rekommenderat pris (RRP) som butiken aldrig sålt för – men: nuvarande pris är faktiskt riktigt bra – du blir inte lurad på affären, bara på reans storlek!`;
-        } else {
-          fakeSaleWarning = `⚠️ Fejkad rea: Tidigare pris (${previousPrice} kr) är minst 25% högre än rimligt marknadspris (${fairMin}-${fairMax} kr) för en ny modell (${yearMatch ? yearMatch[0] : ''}). Detta är troligen ett rekommenderat pris (RRP) som butiken aldrig sålt för – nuvarande pris är det riktiga marknadspriset.`;
-        }
-      }
-    }
-
-    return { ...scrapedData, aiAnalysis: analysis, fakeSaleFlag, fakeSaleWarning, previousPrice, isNewUnreleasedProduct };
-  } catch (error) {
-    console.error('AI Analysis error:', error);
+    return { ...scrapedData, aiAnalysis: analysis, previousPrice };
+  } catch (err) {
+    console.error("AI Analysis error:", err);
     return { ...scrapedData, aiAnalysis: null };
   }
 }
 
+// ------------------------------------------------------------
+// MAIN API ROUTE
+// ------------------------------------------------------------
 export async function POST(req: Request) {
+  console.log("🔥 ANALYZE CALLED (start)");
 
   try {
+    console.log("🔥 STEP 1: Reading JSON...");
     const { url } = await req.json();
+    console.log("🔥 STEP 1 OK:", { url });
 
     if (!url || typeof url !== "string") {
-      return NextResponse.json({ error: "Ingen giltig URL mottagen." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Ingen giltig URL mottagen." },
+        { status: 400 },
+      );
     }
 
+    console.log("🔥 STEP 2: Fetching page HTML...");
     const res = await fetch(url, {
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "sv-SE,sv;q=0.9",
+        Referer: "https://www.google.com/",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
       },
     });
 
     if (!res.ok) {
-      return NextResponse.json({ error: `Kunde inte hämta sidan (${res.status}).` }, { status: 500 });
+      console.error("❌ Fetch failed with status:", res.status);
+      // Universal svensk fallback för fetch-fel (t.ex. 403, 404)
+      return NextResponse.json({
+        sourceUrl: url,
+        pageTitle: "Kunde inte hämta produkt",
+        priceValue: null,
+        priceRaw: "Ej tillgängligt",
+        description: "Produkten kunde inte hämtas – sidan blockerar automatiserad hämtning eller är otillgänglig.",
+        imageUrl: null,
+        condition: "okänd",
+        campaignInfo: null,
+        previousPrice: null,
+        error: `Kunde inte hämta sidan (HTTP ${res.status})`,
+      }, { status: 200 });
     }
 
     const html = await res.text();
+    console.log("🔥 STEP 2 OK: HTML length:", html.length);
 
+    // --------------------------------------------------------
+    // ROUTING TILL RÄTT SCRAPER
+    // --------------------------------------------------------
+    type SiteHandler = {
+      match: (url: string) => boolean;
+      scrape: (html: string, url: string) => Promise<any> | any;
+    };
 
-    // Route to site-specific scrapers
-    const siteHandlers = [
+    const siteHandlers: SiteHandler[] = [
       {
-        match: (url: string) => url.includes("tradera.com"),
-        scrape: (html: string, url: string) => traderaScraper(html, url)
+        match: (u) => /netonnet\.se/.test(u),
+        scrape: (html, url) => netonnetScraper(html, url),
+      },
+      { match: (u) => /tradera\.com/.test(u), scrape: traderaScraper },
+      { match: (u) => /xxl\.se/.test(u), scrape: xxlScraper },
+      { match: (u) => /elgiganten\.se/.test(u), scrape: elgigantenScraper },
+      { match: (u) => /blocket\.se/.test(u), scrape: blocketScraper },
+      { match: (u) => /hedinautomotive\.se/.test(u), scrape: hedinScraper },
+      {
+        match: (u) => /power\.se/.test(u),
+        scrape: (_html, url) => powerScraper(url),
       },
       {
-        match: (url: string) => url.includes("xxl.se"),
-        scrape: (html: string, url: string) => xxlScraper(html, url)
+        match: (u) => /sellpy\.se/.test(u),
+        scrape: (_html, url) => sellpyScraper(url),
       },
       {
-        match: (url: string) => url.includes("elgiganten.se"),
-        scrape: (html: string, url: string) => elgigantenScraper(html, url)
+        match: (u) => /vinted\.se/.test(u),
+        scrape: (html, url) => vintedScraper(html, url),
       },
       {
-        match: (url: string) => url.includes("blocket.se"),
-        scrape: (html: string, url: string) => blocketScraper(html, url)
+        match: (u) => /webhallen\.com/.test(u),
+        scrape: (_html, url) => webhallenScraperV2(url),
       },
-      {
-        match: (url: string) => url.includes("hedinautomotive.se"),
-        scrape: (html: string, url: string) => hedinScraper(html, url)
-      },
-      {
-        match: (url: string) => url.includes("power.se"),
-        scrape: async (_html: string, url: string) => await powerScraper(url)
-      },
-      {
-        match: (url: string) => url.includes("sellpy.se"),
-        scrape: async (_html: string, url: string) => await sellpyScraper(url)
-      },
-      {
-        match: (url: string) => url.includes("vinted.se"),
-        scrape: async (html: string, url: string) => await vintedScraper(html, url)
-      },
-      {
-        match: (url: string) => url.includes("webhallen.com"),
-        scrape: async (_html: string, url: string) => await webhallenScraperV2(url)
-      },
-      // {
-      //   match: (url: string) => url.includes("inet.se"),
-      //   scrape: async (_html: string, url: string) => await inetTestScraper(url)
-      // },
     ];
+
+    let scraped: any | null = null;
 
     for (const handler of siteHandlers) {
       if (handler.match(url)) {
-        const result = await handler.scrape(html, url);
-        // Bygg cache-nyckel på titel + prisvärde (eller brand)
-        const cacheKey = makeCacheKey({
-          title: result.pageTitle || (result as any).ogTitle || '',
-          priceValue: result.priceValue,
-          brand: (result as any).brand || ''
-        });
-        
-        // CACHE DISABLED FOR TESTING
-        // if (productCache.has(cacheKey)) {
-        //   return NextResponse.json(productCache.get(cacheKey));
-        // }
-        
-        const safeResult = { ...result } as any;
-        if (safeResult.altCandidates) delete safeResult.altCandidates;
-        const analyzedResult = await addAIAnalysis(safeResult, url);
-        
-        // CACHE DISABLED FOR TESTING
-        // productCache.set(cacheKey, analyzedResult);
-        
-        return NextResponse.json(analyzedResult);
-      }
-    }
-
-    // Generic fallback: improved for e-commerce sites
-    const headEnd = html.indexOf("</head>");
-    const bodyHtml = headEnd !== -1 ? html.slice(headEnd) : html;
-    const topChunk = bodyHtml.slice(0, 12000);
-
-    // Extract title
-    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    const ogMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["'][^>]*>/i);
-    const pageTitle = titleMatch ? decodeEntities(titleMatch[1].trim()) : null;
-    const ogTitle = ogMatch ? decodeEntities(ogMatch[1].trim()) : null;
-
-    // Extract price from structured data (meta tags, JSON-LD)
-    let priceRaw: string | null = null;
-    let priceValue: number | null = null;
-    let priceContext: string | null = null;
-    let priceConfidence: number | null = null;
-
-    // Try JSON-LD first
-    try {
-      const jsonLdMatch = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
-      if (jsonLdMatch) {
-        const parsed = JSON.parse(jsonLdMatch[1]);
-        const objs = Array.isArray(parsed) ? parsed : [parsed];
-        for (const obj of objs) {
-          const price = obj?.offers?.price ?? obj?.price ?? null;
-          if (price != null) {
-            const digits = String(price).replace(/[^0-9]/g, "");
-            const num = Number(digits);
-            if (!Number.isNaN(num) && num > 0) {
-              priceValue = num;
-              priceRaw = `${num} kr`;
-              priceContext = "(från JSON-LD)";
-              priceConfidence = 0.75;
-              break;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    // Try meta tags (og:price, product:price, itemprop)
-    if (!priceValue) {
-      const metaPriceMatch = html.match(/<meta[^>]+(?:property|name|itemprop)=["'](?:og:price:amount|product:price:amount|price)["'][^>]+content=["']([^"']+)["'][^>]*>/i);
-      if (metaPriceMatch) {
-        const digits = metaPriceMatch[1].replace(/[^0-9]/g, "");
-        const num = Number(digits);
-        if (!Number.isNaN(num) && num > 0) {
-          priceValue = num;
-          priceRaw = `${num} kr`;
-          priceContext = "(från meta)";
-          priceConfidence = 0.7;
-        }
-      }
-    }
-
-    // Fallback to regex in body if no structured price
-    if (!priceValue) {
-      const pm = topChunk.match(/([0-9][0-9\s]{0,10})\s*kr\b/i);
-      if (pm) {
-        priceRaw = decodeEntities(pm[0].trim());
-        const digits = pm[1].replace(/\s/g, "");
-        const num = Number(digits);
-        if (!Number.isNaN(num)) {
-          priceValue = num;
-          priceConfidence = 0.4;
-        }
-        const idx = pm.index ?? -1;
-        if (idx >= 0) {
-          const start = Math.max(0, idx - 80);
-          const end = Math.min(topChunk.length, idx + 80);
-          priceContext = decodeEntities(topChunk.slice(start, end));
-        }
-      }
-    }
-
-    // Extract description
-    let description: string | null = null;
-    const descMarkers = ["Beskrivning", "Produktbeskrivning", "Product description", "Om produkten", "Produktdetaljer"];
-    for (const marker of descMarkers) {
-      const descIdx = topChunk.indexOf(marker);
-      if (descIdx !== -1) {
-        // Take a smaller slice to avoid extra content (max 1500 chars after marker)
-        const descSlice = topChunk.slice(descIdx, descIdx + 1500);
-        let cleaned = stripHtml(descSlice).replace(new RegExp(`^${marker}\\s*`, "i"), "").trim();
-        
-        // Stop at common noise markers early
-        const stopMarkers = ["Leverans", "Frakt", "Lagerstatus", "Specifikation", "Egenskaper", "Recensioner", "Betyg", "Köp", "Lägg till", "Handla", "Se hela", "Visa alla", "Storlek", "Färg", "Välj"];
-        for (const stop of stopMarkers) {
-          const stopIdx = cleaned.toLowerCase().indexOf(stop.toLowerCase());
-          if (stopIdx > 30) { // only cut if there's at least 30 chars of real description
-            cleaned = cleaned.slice(0, stopIdx).trim();
-            break;
-          }
-        }
-        
-        // Take only first 2-3 sentences if description is very long
-        if (cleaned.length > 400) {
-          const sentences = cleaned.split(/[.!?]+/).filter(s => s.trim().length > 0);
-          cleaned = sentences.slice(0, 3).join(". ").trim();
-          if (cleaned && !cleaned.endsWith(".")) cleaned += ".";
-        }
-        
-        description = cleaned;
+        console.log("🔥 STEP 3: Using handler for URL:", url);
+        scraped = await handler.scrape(html, url);
         break;
       }
     }
-    if (!description || description.length < 20) {
-      // Fallback: take clean text from body, limit to first 2-3 sentences, max 400 chars
-      const fallbackText = stripHtml(topChunk).slice(0, 800).trim();
-      const sentences = fallbackText.split(/[.!?]+/).filter(s => s.trim().length > 10);
-      description = sentences.slice(0, 3).join(". ").trim();
-      if (description && !description.endsWith(".")) description += ".";
-    }
-    // Final safety: cap description at 500 chars
-    if (description && description.length > 500) {
-      description = description.slice(0, 500).trim() + "...";
-    }
 
-    // Compute description_short (heuristic 2-3 sentence summary)
-    let description_short: string | null = null;
-    if (description) {
-      const sentences = description.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 0);
-      const keywords = ["skick", "defekt", "service", "repor", "skadat", "sliten", "ny", "nyskick", "mint", "oöppnad", "originalförpackning", "problem", "garanti", "kvalitet"];
-      const relevant = sentences.filter(sent => {
-        const lower = sent.toLowerCase();
-        return keywords.some(kw => lower.includes(kw));
-      });
-      let shortDesc = relevant.slice(0, 3).join(". ");
-      if (shortDesc.length === 0) {
-        shortDesc = sentences.slice(0, 2).join(". ");
+
+      // Universal fallback for scraper errors or no result
+      if (!scraped || scraped.error || scraped.priceValue === undefined) {
+        console.warn("⚠️ Scraper failed or blocked, returning universal fallback message.");
+        scraped = {
+          sourceUrl: url,
+          pageTitle: "Kunde inte hämta produkt",
+          priceValue: null,
+          priceRaw: "Ej tillgängligt",
+          description: "Produkten kunde inte hämtas – sidan blockerar automatiserad hämtning eller är otillgänglig.",
+          imageUrl: null,
+          condition: "okänd",
+          campaignInfo: null,
+          previousPrice: null,
+          error: scraped?.error || null,
+        };
       }
-      description_short = shortDesc.trim() ? shortDesc.trim() : null;
-    }
 
-    // No comparable_median for generic sites (we don't have multiple listings to compare)
-    const comparable_median: number | null = null;
+    console.log("🔥 STEP 4: Running AI analysis...");
+    const analyzed = await addAIAnalysis(scraped, url);
+    console.log("🔥 STEP 4 OK");
 
-    return NextResponse.json({
-      sourceUrl: url,
-      pageTitle,
-      ogTitle,
-      priceRaw,
-      priceValue,
-      priceConfidence,
-      priceContext,
-      description,
-      description_short,
-      comparable_median,
-    });
-  } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error("Analyze error:", errorMsg, err);
-    return NextResponse.json({ error: `Internt fel i analysen: ${errorMsg}` }, { status: 500 });
+    return NextResponse.json(analyzed);
+  } catch (err: any) {
+    console.error("💥 ANALYZE FAILED (HARD DEBUG):", err);
+    console.error("💥 STACK:", err?.stack);
+    return NextResponse.json(
+      {
+        error: `Internt fel i analysen (HARD DEBUG): ${
+          err?.message || String(err)
+        }`,
+      },
+      { status: 500 },
+    );
   }
 }
-
