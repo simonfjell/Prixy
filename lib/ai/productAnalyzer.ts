@@ -16,6 +16,7 @@ interface ProductData {
   brand?: string;
   category?: string;
   originalPrice?: string;
+  sourceUrl?: string;
 }
 
 export class ProductAnalyzer {
@@ -62,67 +63,80 @@ export class ProductAnalyzer {
   }
 
   private buildAnalysisPrompt(data: ProductData): string {
-    // Försök avgöra om produkten är ny eller begagnad
-      const productType = data.condition && /ny|o?anv[aä]nd|o?öppnad|mint/i.test(data.condition) ? "ny" : "begagnad";
+    // Default = ny
+    let productType = "ny";
 
-      return `
-  Du är Prixy, en AI som gör prisbedömningar med fokus på marknadsvärde, produktkategori, skick, modellår, generationer, specifikationer och historiska priser.
+    // Sidor som nästan alltid säljer begagnat
+    const secondHandDomains = ["tradera", "vinted", "sellpy", "blocket"];
 
-  ===== STEG 1 — FASTSTÄLL PRODUKTENS MARKNADSVÄRDE =====
-  Analysera:
-  - Produktkategori (t.ex. TV, samlarkort, verktyg, kläder, retrospel)
-  - Skick (ny, som ny, begagnad i bra skick, slitet, defekt)
-  - Modellår (t.ex. 2023, 2024, 2025)
-  - Modellserie-historik (t.ex. LG OLED C1 → C2 → C3 → C4 → C5)
-  - Nuvarande marknadspris för jämförbara produkter
-  - Tidigare generationers verkliga prisfall
-  - Data från beskrivning + produktnamn
+    // Om URL matchar → begagnad
+    if (secondHandDomains.some(domain => data.sourceUrl?.includes(domain))) {
+      productType = "begagnad";
+    }
 
-  Beräkna ett “realistiskt marknadsvärde”-intervall (rimligt prisintervall).
+    // Om text uttryckligen säger begagnad → begagnad
+    if (data.condition && /(begagnad|använd|sliten|defekt|used|pre[- ]?owned|refurbished)/i.test(data.condition)) {
+      productType = "begagnad";
+    }
 
-  ===== STEG 2 — HANTERA FEJKADE REOR SÄRSKILT FÖR NYA PRODUKTER =====
-  Regler för bluff-reor:
-  1. Om produktens modellår är 2024 eller 2025 OCH “tidigare pris” endast kommer från butiken → anta att det är rekommenderat introduktionspris, inte verkligt marknadspris.
-  2. Om tidigare pris är mer än 40% över ditt beräknade marknadsvärde → markera “Fejkad rea”.
-  3. Om produkten är helt ny modell (t.ex. C5 2025, QN90D 2024):
-     - använd föregående modells marknadspris som referens (ex: C4 65" låg normalt 16 000–19 000 efter kampanjer → C5 bör ligga liknande eller aningen högre).
-     - ignorera butikers listpris helt.
-  4. Om ”tidigare pris” är exakt samma hos flera butiker → det är listpris → behandla som potentiellt falskt.
+    return `
+Du är Prixy, en AI som gör prisbedömningar med fokus på marknadsvärde, produktkategori, skick, modellår, generationer, specifikationer och historiska priser.
 
-  ===== STEG 3 — BESTÄM PRISKATEGORI =====
-  Bedömningen ska ENDAST baseras på:
-  - Ditt marknadsvärdesintervall
-  - Produktens skick
-  - Jämförelse mot angivet pris
+===== STEG 1 — FASTSTÄLL PRODUKTENS MARKNADSVÄRDE =====
+Analysera:
+- Produktkategori (t.ex. TV, samlarkort, verktyg, kläder, retrospel)
+- Skick (ny, som ny, begagnad i bra skick, slitet, defekt)
+- Modellår (t.ex. 2023, 2024, 2025)
+- Modellserie-historik (t.ex. LG OLED C1 → C2 → C3 → C4 → C5)
+- Nuvarande marknadspris för jämförbara produkter
+- Tidigare generationers verkliga prisfall
+- Data från beskrivning + produktnamn
 
-  Regler:
-  • Kap: Om priset ligger ≥25% under ditt rimliga intervall.
-  • Rimligt: Om priset ligger inom ditt intervall (±10%).
-  • Överpris: Om priset ligger >15% över ditt intervall.
-  • Fejkad rea: Om tidigare pris är bluff enligt steg 2, även om nupriset är rimligt.
+Beräkna ett “realistiskt marknadsvärde”-intervall (rimligt prisintervall).
 
-  ===== STEG 4 — SKAPA SLUTRAPPORT =====
-  Svara i strukturen:
-  {
-    "verdict": "kap|rimligt|överpris|fejkad rea|oklart",
-    "confidence": 0.85,
-    "reasoning": "Kort förklaring på svenska varför",
-    "estimatedFairPrice": "18000-20000kr",
-    "priceCategory": "billigt|normalt|dyrt"
-  }
+===== STEG 2 — HANTERA FEJKADE REOR SÄRSKILT FÖR NYA PRODUKTER =====
+Regler för bluff-reor:
+1. Om produktens modellår är 2024 eller 2025 OCH “tidigare pris” endast kommer från butiken → anta att det är rekommenderat introduktionspris, inte verkligt marknadspris.
+2. Om tidigare pris är mer än 40% över ditt beräknade marknadsvärde → markera “Fejkad rea”.
+3. Om produkten är helt ny modell (t.ex. C5 2025, QN90D 2024):
+   - använd föregående modells marknadspris som referens (ex: C4 65" låg normalt 16 000–19 000 efter kampanjer → C5 bör ligga liknande eller aningen högre).
+   - ignorera butikers listpris helt.
+4. Om ”tidigare pris” är exakt samma hos flera butiker → det är listpris → behandla som potentiellt falskt.
 
-  Produktdata:
-  TITEL: ${data.title}
-  PRIS: ${data.price}
-  ${data.description ? `BESKRIVNING: ${data.description}` : ''}
-  ${data.condition ? `SKICK: ${data.condition}` : ''}
-  ${data.brand ? `MÄRKE: ${data.brand}` : ''}
-  ${data.originalPrice ? `TIDIGARE PRIS: ${data.originalPrice}` : ''}
+===== STEG 3 — BESTÄM PRISKATEGORI =====
+Bedömningen ska ENDAST baseras på:
+- Ditt marknadsvärdesintervall
+- Produktens skick
+- Jämförelse mot angivet pris
 
-  Produkten är troligen: ${productType}.
+Regler:
+• Kap: Om priset ligger ≥25% under ditt rimliga intervall.
+• Rimligt: Om priset ligger inom ditt intervall (±10%).
+• Överpris: Om priset ligger >15% över ditt intervall.
+• Fejkad rea: Om tidigare pris är bluff enligt steg 2, även om nupriset är rimligt.
 
-  Undvik att överdriva. Var exakt och marknadsbaserad.
-  `;
+===== STEG 4 — SKAPA SLUTRAPPORT =====
+Svara i strukturen:
+{
+  "verdict": "kap|rimligt|överpris|fejkad rea|oklart",
+  "confidence": 0.85,
+  "reasoning": "Kort förklaring på svenska varför",
+  "estimatedFairPrice": "18000-20000kr",
+  "priceCategory": "billigt|normalt|dyrt"
+}
+
+Produktdata:
+TITEL: ${data.title}
+PRIS: ${data.price}
+${data.description ? `BESKRIVNING: ${data.description}` : ''}
+${data.condition ? `SKICK: ${data.condition}` : ''}
+${data.brand ? `MÄRKE: ${data.brand}` : ''}
+${data.originalPrice ? `TIDIGARE PRIS: ${data.originalPrice}` : ''}
+
+Produkten ska behandlas som: ${productType}.
+
+Undvik att överdriva. Var exakt och marknadsbaserad.
+`;
     }
   }
 
