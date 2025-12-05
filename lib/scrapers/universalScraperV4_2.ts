@@ -69,7 +69,7 @@ export async function universalScraperV4_2(html: string, url: string) {
                 const arr = Array.isArray(product.offers)
                   ? product.offers
                   : [product.offers];
-                const offer = arr.find(o => o.price) || arr[0];
+                const offer = arr.find((o: any) => (o && o.price)) || arr[0];
 
                 if (offer?.price) jsonLdPrice = parsePrice(offer.price);
                 if (offer?.highPrice) jsonLdPrev = parsePrice(offer.highPrice);
